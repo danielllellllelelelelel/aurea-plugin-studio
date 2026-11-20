@@ -111,27 +111,164 @@ export function validatePluginProject(project) {
   };
 }
 
+
+function makeCrcTable() {
+  const table = new Uint32Array(256);
+
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) {
+      c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    }
+    table[n] = c >>> 0;
+  }
+
+  return table;
+}
+
+const CRC_TABLE = makeCrcTable();
+
+function crc32(bytes) {
+  let crc = 0xFFFFFFFF;
+
+  for (const byte of bytes) {
+    crc = CRC_TABLE[(crc ^ byte) & 0xFF] ^ (crc >>> 8);
+  }
+
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+function joinBytes(parts) {
+  const length = parts.reduce((sum, part) => sum + part.length, 0);
+  const result = new Uint8Array(length);
+  let offset = 0;
+
+  for (const part of parts) {
+    result.set(part, offset);
+    offset += part.length;
+  }
+
+  return result;
+}
+
+function createZip(files) {
+  const encoder = new TextEncoder();
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+
+  const now = new Date();
+  const dosTime =
+    (now.getHours() << 11) |
+    (now.getMinutes() << 5) |
+    Math.floor(now.getSeconds() / 2);
+
+  const dosDate =
+    ((now.getFullYear() - 1980) << 9) |
+    ((now.getMonth() + 1) << 5) |
+    now.getDate();
+
+  for (const [filename, content] of Object.entries(files)) {
+    const name = encoder.encode(filename);
+    const data = typeof content === "string"
+      ? encoder.encode(content)
+      : content;
+
+    const crc = crc32(data);
+    const size = data.length;
+
+    const local = new Uint8Array(30 + name.length);
+    const lv = new DataView(local.buffer);
+
+    lv.setUint32(0, 0x04034B50, true);
+    lv.setUint16(4, 20, true);
+    lv.setUint16(6, 0x0800, true);
+    lv.setUint16(8, 0, true);
+    lv.setUint16(10, dosTime, true);
+    lv.setUint16(12, dosDate, true);
+    lv.setUint32(14, crc, true);
+    lv.setUint32(18, size, true);
+    lv.setUint32(22, size, true);
+    lv.setUint16(26, name.length, true);
+    lv.setUint16(28, 0, true);
+    local.set(name, 30);
+
+    localParts.push(local, data);
+
+    const central = new Uint8Array(46 + name.length);
+    const cv = new DataView(central.buffer);
+
+    cv.setUint32(0, 0x02014B50, true);
+    cv.setUint16(4, 20, true);
+    cv.setUint16(6, 20, true);
+    cv.setUint16(8, 0x0800, true);
+    cv.setUint16(10, 0, true);
+    cv.setUint16(12, dosTime, true);
+    cv.setUint16(14, dosDate, true);
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, size, true);
+    cv.setUint32(24, size, true);
+    cv.setUint16(28, name.length, true);
+    cv.setUint16(30, 0, true);
+    cv.setUint16(32, 0, true);
+    cv.setUint16(34, 0, true);
+    cv.setUint16(36, 0, true);
+    cv.setUint32(38, 0, true);
+    cv.setUint32(42, offset, true);
+    central.set(name, 46);
+
+    centralParts.push(central);
+    offset += local.length + data.length;
+  }
+
+  const centralDirectory = joinBytes(centralParts);
+  const localData = joinBytes(localParts);
+
+  const end = new Uint8Array(22);
+  const ev = new DataView(end.buffer);
+
+  ev.setUint32(0, 0x06054B50, true);
+  ev.setUint16(4, 0, true);
+  ev.setUint16(6, 0, true);
+  ev.setUint16(8, centralParts.length, true);
+  ev.setUint16(10, centralParts.length, true);
+  ev.setUint32(12, centralDirectory.length, true);
+  ev.setUint32(16, localData.length, true);
+  ev.setUint16(20, 0, true);
+
+  return joinBytes([localData, centralDirectory, end]);
+}
+
 export function exportAureaPlugin(project) {
   const check = validatePluginProject(project);
+
   if (!check.valid) {
     return { ok: false, errors: check.errors };
   }
 
-  const bundle = {
-    exportedBy: 'Aurea Plugin Studio',
-    detectedVersion: check.manifest.formatVersion,
-    manifest: JSON.parse(project.files['plugin.json']),
-    files: project.files
-  };
+  const zipBytes = createZip(project.files);
 
-  const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
-  const filename = `${check.manifest.name.replace(/\s+/g, '_')}_V${check.manifest.formatVersion}.aurea.json`;
+  const blob = new Blob([zipBytes], {
+    type: "application/zip"
+  });
+
+  const filename =
+    `${check.manifest.name.replace(/\s+/g, "_")}_V${check.manifest.formatVersion}.aureaplugin`;
+
   const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
+  const a = document.createElement("a");
+
   a.href = url;
   a.download = filename;
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(url);
+  a.remove();
 
-  return { ok: true, filename, manifest: check.manifest };
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+  return {
+    ok: true,
+    filename,
+    manifest: check.manifest
+  };
 }
