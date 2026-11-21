@@ -245,7 +245,8 @@ export function exportAureaPlugin(project) {
   if (!check.valid) {
     return { ok: false, errors: check.errors };
   }
-console.log("EXPORT FILES:", Object.keys(project.files));
+console.log("PROJECT:", project);
+console.log("FILES:", project.files);
   const zipBytes = createZip(project.files);
 
   const blob = new Blob([zipBytes], {
